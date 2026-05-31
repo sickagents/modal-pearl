@@ -29,7 +29,9 @@ PID_DIR = BASE_DIR / ".pids"
 LOG_DIR = BASE_DIR / "logs"
 TOKEN_DIR = BASE_DIR / ".tokens"
 
-AUTO_WORKERS = 5  # "auto" spawns this many; Modal limits by quota
+# "auto" spawns this many workers. If Modal quota is lower (e.g. 1-2),
+# it simply runs what it can — no error, no crash. Safe to set high.
+AUTO_WORKERS = 10
 RESTART_DELAY = 10  # seconds between restart cycles
 STAGGER_DELAY = 10  # seconds between starting accounts
 
