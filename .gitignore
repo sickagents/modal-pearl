@@ -1,0 +1,5 @@
+.tokens/
+.pids/
+logs/
+__pycache__/
+*.pyc
