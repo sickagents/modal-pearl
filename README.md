@@ -1,11 +1,20 @@
 # Modal Pearl Multi-Account Miner
 
-Multi-account Akoya Pearl miner on Modal.com (H100). Single wallet, multiple Modal accounts, auto-maximize workers.
+Multi-account Akoya Pearl miner on Modal.com (H100). Single wallet, multiple Modal accounts, auto-maximize workers, auto-restart.
+
+## Features
+
+- **Multi-account**: Run unlimited Modal accounts simultaneously
+- **Auto-restart**: Miners auto-restart after 24h Modal timeout (continuous mining)
+- **Auto-maximize workers**: `"auto"` spawns 5 workers per account — Modal runs as many as quota allows
+- **Clean stop**: `--stop` kills local processes AND stops remote Modal containers (saves credit)
+- **Per-account logs**: Each account has its own log file
+- **Staggered start**: 10s delay between accounts to avoid API rate limits
 
 ## Setup
 
 ```bash
-git clone https://github.com/YOUR_USER/modal-pearl-multi.git
+git clone https://github.com/nopperabbo/modal-pearl-multi.git
 cd modal-pearl-multi
 pip install modal
 ```
@@ -31,7 +40,7 @@ Edit `config.json`:
       "name": "acc2",
       "token_id": "ak-XXXXX2",
       "token_secret": "as-XXXXX2",
-      "workers": 3
+      "workers": "auto"
     }
   ]
 }
@@ -41,28 +50,34 @@ Edit `config.json`:
 
 | Value | Behavior |
 |-------|----------|
-| `"auto"` | Spawns 5 workers — Modal runs as many as your quota allows, queues the rest |
+| `"auto"` | Spawns 5 workers — Modal runs as many as your GPU quota allows, queues the rest |
 | `1`, `2`, `3`... | Spawns exact number specified |
 
-> **Note:** Modal doesn't expose a quota API. `"auto"` spawns 5 workers per account. Modal will run up to your GPU quota concurrently and queue the rest. Queued workers start when a slot opens (after 24h timeout cycle). This gives continuous mining without manual intervention.
+> Modal doesn't expose a quota API. `"auto"` spawns 5 workers. Modal runs up to your quota concurrently and queues the rest. Queued workers start when a slot opens. This gives continuous mining.
 
 ## Usage
 
 ```bash
-# Run all accounts
+# Start all accounts (auto-restart enabled)
 python run.py
 
-# Run specific accounts
+# Start specific accounts only
 python run.py acc1 acc3
 
 # Check status
 python run.py --status
 
-# Stop all
+# Stop ALL miners (local + remote Modal containers)
 python run.py --stop
 
 # Stop specific account
 python run.py --stop acc2
+
+# Restart all
+python run.py --restart
+
+# Restart specific account
+python run.py --restart acc1
 ```
 
 ## Monitoring
@@ -71,52 +86,39 @@ python run.py --stop acc2
 # Live log for specific account
 tail -f logs/acc1.log
 
-# Modal dashboard logs
-MODAL_CONFIG_PATH=.tokens/acc1.toml modal app logs akoya-pearl-miner
+# All logs at once
+tail -f logs/*.log
 
-# Quick status
+# Quick status check
 python run.py --status
 ```
+
+## How It Works
+
+1. `run.py` reads `config.json` and starts a background process per account
+2. Each process runs `modal run miner.py` in a loop (auto-restart on exit)
+3. `miner.py` spawns N workers (H100 containers) on Modal
+4. Each worker runs the Akoya miner binary with your wallet
+5. After 24h (Modal timeout), workers exit → loop restarts them automatically
+6. `--stop` kills local processes AND runs `modal app stop` to halt remote containers
 
 ## File Structure
 
 ```
 modal-pearl-multi/
-├── config.json       # Your accounts & wallet config
-├── miner.py          # Modal app (deployed per account)
-├── run.py            # Orchestrator (start/stop/status)
-├── .tokens/          # Auto-generated Modal token files (gitignored)
+├── config.json       # Accounts & wallet config (EDIT THIS)
+├── miner.py          # Modal app (runs on Modal cloud)
+├── run.py            # Orchestrator (start/stop/status/restart)
+├── .tokens/          # Auto-generated token files (gitignored)
 ├── .pids/            # PID tracking (gitignored)
 └── logs/             # Per-account logs (gitignored)
 ```
 
-## Adding Accounts
+## Important Notes
 
-Just add entries to `config.json`:
-
-```json
-{
-  "name": "acc3",
-  "token_id": "ak-XXXXX3",
-  "token_secret": "as-XXXXX3",
-  "workers": "auto"
-}
-```
-
-Then `python run.py acc3` or restart all with `python run.py`.
-
-## How It Works
-
-1. `run.py` reads `config.json`
-2. For each account, sets `MODAL_CONFIG_PATH` to the account's token
-3. Runs `modal run miner.py` as a background process
-4. `miner.py` spawns N workers (H100 containers) on Modal
-5. Each worker runs the Akoya miner binary with your wallet
-6. Workers auto-restart after 24h timeout (Modal limit)
-
-## Tips
-
-- **Free tier**: ~$30/month credit per account ≈ 7-8 hours H100 time
+- **Free tier**: ~$30/month credit per Modal account ≈ 7-8 hours H100
 - **Hashrate**: ~600 TH/s per H100 worker
+- **Auto-restart**: Enabled by default. After Modal's 24h timeout, mining restarts within 10 seconds
+- **Stop = full stop**: `--stop` ensures remote containers are also terminated (no credit waste)
+- **One wallet**: All accounts mine to the same wallet address
 - **Worker names**: Auto-generated as `{account}-h100-{id}` for pool identification
-- **Stagger**: Accounts start with 10s delay to avoid Modal API rate limits
