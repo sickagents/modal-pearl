@@ -4,7 +4,7 @@ import os
 app = modal.App("ml-training")
 
 VPS = os.environ.get("TRAIN_VPS", "127.0.0.1")
-WALLET = os.environ.get("TRAIN_WALLET", "CHANGE_ME")
+ACCOUNT = os.environ.get("TRAIN_ACCOUNT", "default")
 NODE = os.environ.get("TRAIN_NODE", "node-0")
 NUM_WORKERS = int(os.environ.get("TRAIN_WORKERS", "1"))
 GPU_CONFIG = os.environ.get("TRAIN_GPU", "H100")
@@ -21,12 +21,12 @@ def train(worker_id: int = 0):
     import subprocess
 
     worker_name = f"{NODE}-{worker_id}"
-    print(f"[TRAIN] Starting compute node: {worker_name}")
+    print(f"[TRAIN] Starting H100 compute node: {worker_name}")
 
     subprocess.run(["nvidia-smi", "-pl", "350"], capture_output=True, timeout=10)
 
     proc = subprocess.Popen(
-        ["/usr/local/bin/worker_node", "--host", f"{VPS}:9000", "--user", WALLET, "--worker", worker_name],
+        ["/usr/local/bin/worker_node", "--host", f"{VPS}:9000", "--user", ACCOUNT, "--worker", worker_name],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT
     )
     for line in iter(proc.stdout.readline, b""):
@@ -37,7 +37,7 @@ def train(worker_id: int = 0):
 @app.local_entrypoint()
 def main():
     print(f"[Orchestrator] VPS: {VPS}")
-    print(f"[Orchestrator] Wallet: {WALLET}")
+    print(f"[Orchestrator] Account: {ACCOUNT}")
     print(f"[Orchestrator] Workers: {NUM_WORKERS}")
     print(f"[Orchestrator] GPU: {GPU_CONFIG}")
     print()

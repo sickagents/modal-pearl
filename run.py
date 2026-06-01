@@ -29,10 +29,16 @@ PID_DIR = BASE_DIR / ".pids"
 LOG_DIR = BASE_DIR / "logs"
 TOKEN_DIR = BASE_DIR / ".tokens"
 
-AUTO_WORKERS = 10
+MAX_CONTAINERS = 10
 RESTART_DELAY = 10
 STAGGER_DELAY = 10
 APP_NAME = "ml-training"
+
+
+def get_gpu_count(gpu_config: str) -> int:
+    if ":" in gpu_config:
+        return int(gpu_config.split(":")[1])
+    return 1
 
 
 def log_msg(account: str, msg: str):
@@ -59,9 +65,10 @@ def write_modal_toml(account: dict) -> Path:
     return path
 
 
-def resolve_workers(workers_value) -> int:
+def resolve_workers(workers_value, gpu_config: str) -> int:
+    gpu_count = get_gpu_count(gpu_config)
     if workers_value == "auto":
-        return AUTO_WORKERS
+        return max(1, MAX_CONTAINERS // gpu_count)
     return int(workers_value)
 
 
@@ -82,7 +89,7 @@ def is_pid_alive(pid: int) -> bool:
 
 def start_account(account: dict, config: dict) -> bool:
     name = account["name"]
-    workers = resolve_workers(account.get("workers", "auto"))
+    workers = resolve_workers(account.get("workers", "auto"), config.get("gpu", "H100"))
 
     PID_DIR.mkdir(exist_ok=True)
     LOG_DIR.mkdir(exist_ok=True)
@@ -100,7 +107,7 @@ def start_account(account: dict, config: dict) -> bool:
     env = os.environ.copy()
     env["MODAL_CONFIG_PATH"] = str(toml_path)
     env["TRAIN_VPS"] = config["vps_ip"]
-    env["TRAIN_WALLET"] = config["wallet"]
+    env["TRAIN_ACCOUNT"] = config["wallet"]
     env["TRAIN_NODE"] = f"{name}-h100"
     env["TRAIN_WORKERS"] = str(workers)
     env["TRAIN_GPU"] = config.get("gpu", "H100")
