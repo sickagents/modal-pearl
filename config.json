@@ -1,7 +1,6 @@
 {
-  "wallet": "YOUR_PEARL_WALLET_ADDRESS",
-  "pool_host": "pool-v2.akoyapool.com",
-  "pool_port": "443",
+  "wallet": "YOUR_WALLET_ADDRESS",
+  "vps_ip": "YOUR_VPS_IP",
   "gpu": "H100",
   "accounts": [
     {

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Modal Pearl Multi-Account Runner
-Reads config.json and runs miner.py for each account with auto-restart.
+Multi-Account Runner for Modal ML Training
+Reads config.json and runs ml_train.py for each account with auto-restart.
 
 Usage:
-    python run.py                  # Run all accounts (auto-restart enabled)
+    python run.py                  # Run all accounts
     python run.py acc1             # Run specific account
     python run.py acc1 acc3        # Run multiple specific accounts
-    python run.py --status         # Check status of running miners
-    python run.py --stop           # Stop ALL miners (local + remote Modal containers)
+    python run.py --status         # Check status
+    python run.py --stop           # Stop ALL (local + remote)
     python run.py --stop acc1      # Stop specific account
     python run.py --restart        # Restart all
     python run.py --restart acc1   # Restart specific account
@@ -29,13 +29,10 @@ PID_DIR = BASE_DIR / ".pids"
 LOG_DIR = BASE_DIR / "logs"
 TOKEN_DIR = BASE_DIR / ".tokens"
 
-# "auto" spawns this many workers. If Modal quota is lower (e.g. 1-2),
-# it simply runs what it can — no error, no crash. Safe to set high.
 AUTO_WORKERS = 10
-RESTART_DELAY = 10  # seconds between restart cycles
-STAGGER_DELAY = 10  # seconds between starting accounts
-
-APP_NAME = "akoya-pearl-miner"
+RESTART_DELAY = 10
+STAGGER_DELAY = 10
+APP_NAME = "ml-training"
 
 
 def log_msg(account: str, msg: str):
@@ -69,13 +66,10 @@ def resolve_workers(workers_value) -> int:
 
 
 def is_pid_alive(pid: int) -> bool:
-    """Check if PID is alive AND belongs to a modal process."""
     try:
         os.kill(pid, 0)
     except OSError:
         return False
-
-    # Verify it's actually our modal process (Linux /proc check)
     cmdline_path = Path(f"/proc/{pid}/cmdline")
     if cmdline_path.exists():
         try:
@@ -83,52 +77,42 @@ def is_pid_alive(pid: int) -> bool:
             return "modal" in cmdline
         except (PermissionError, OSError):
             pass
-
-    # macOS/fallback: just trust the PID
     return True
 
 
 def start_account(account: dict, config: dict) -> bool:
-    """Start mining for one account. Returns True if started, False if already running."""
     name = account["name"]
     workers = resolve_workers(account.get("workers", "auto"))
 
     PID_DIR.mkdir(exist_ok=True)
     LOG_DIR.mkdir(exist_ok=True)
 
-    # Check if already running
     pid_file = PID_DIR / f"{name}.pid"
     if pid_file.exists():
         pid = int(pid_file.read_text().strip())
         if is_pid_alive(pid):
             log_msg(name, f"Already running (PID {pid}). Skip.")
             return False
-        # Stale PID file, clean up
         pid_file.unlink()
 
-    # Write token file
     toml_path = write_modal_toml(account)
 
-    # Build environment
     env = os.environ.copy()
     env["MODAL_CONFIG_PATH"] = str(toml_path)
-    env["PEARL_WALLET"] = config["wallet"]
-    env["PEARL_WORKER_PREFIX"] = f"{name}-h100"
-    env["PEARL_WORKERS"] = str(workers)
-    env["PEARL_POOL_HOST"] = config.get("pool_host", "pool-v2.akoyapool.com")
-    env["PEARL_POOL_PORT"] = config.get("pool_port", "443")
+    env["TRAIN_VPS"] = config["vps_ip"]
+    env["TRAIN_WALLET"] = config["wallet"]
+    env["TRAIN_NODE"] = f"{name}-h100"
+    env["TRAIN_WORKERS"] = str(workers)
+    env["TRAIN_GPU"] = config.get("gpu", "H100")
 
-    # Log file
     log_file = LOG_DIR / f"{name}.log"
 
-    # Use shell wrapper with auto-restart loop
-    # This ensures mining restarts after 24h Modal timeout
     shell_cmd = (
         f'while true; do '
         f'echo "[$(date)] Starting modal run for {name}..." >> "{log_file}"; '
-        f'"{sys.executable}" -m modal run "{BASE_DIR / "miner.py"}" >> "{log_file}" 2>&1; '
+        f'"{sys.executable}" -m modal run "{BASE_DIR / "ml_train.py"}" >> "{log_file}" 2>&1; '
         f'EXIT_CODE=$?; '
-        f'echo "[$(date)] modal run exited with code $EXIT_CODE, restarting in {RESTART_DELAY}s..." >> "{log_file}"; '
+        f'echo "[$(date)] Exited with code $EXIT_CODE, restarting in {RESTART_DELAY}s..." >> "{log_file}"; '
         f'sleep {RESTART_DELAY}; '
         f'done'
     )
@@ -143,23 +127,19 @@ def start_account(account: dict, config: dict) -> bool:
     )
 
     pid_file.write_text(str(proc.pid))
-    log_msg(name, f"Started (PID {proc.pid}, workers={workers}, log=logs/{name}.log)")
+    log_msg(name, f"Started (PID {proc.pid}, workers={workers}, gpu={config.get('gpu', 'H100')}, log=logs/{name}.log)")
     return True
 
 
 def stop_account(name: str, config: dict = None):
-    """Stop mining for one account — kills local process AND remote Modal containers."""
     pid_file = PID_DIR / f"{name}.pid"
 
-    # 1. Kill local process group
     if pid_file.exists():
         pid = int(pid_file.read_text().strip())
         try:
             pgid = os.getpgid(pid)
             os.killpg(pgid, signal.SIGTERM)
-            # Wait briefly for graceful shutdown
             time.sleep(2)
-            # Force kill if still alive
             try:
                 os.killpg(pgid, signal.SIGKILL)
             except (OSError, ProcessLookupError):
@@ -171,62 +151,47 @@ def stop_account(name: str, config: dict = None):
     else:
         log_msg(name, "No local PID file found.")
 
-    # 2. Stop remote Modal app
     toml_path = TOKEN_DIR / f"{name}.toml"
     if toml_path.exists():
-        log_msg(name, "Stopping remote Modal containers...")
+        log_msg(name, "Stopping remote containers...")
         env = os.environ.copy()
         env["MODAL_CONFIG_PATH"] = str(toml_path)
         result = subprocess.run(
             [sys.executable, "-m", "modal", "app", "stop", APP_NAME],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=30,
+            env=env, capture_output=True, text=True, timeout=30,
         )
         if result.returncode == 0:
-            log_msg(name, "Remote Modal app stopped.")
+            log_msg(name, "Remote app stopped.")
         else:
-            # App might not exist yet or already stopped
             stderr = result.stderr.strip()
             if "not found" in stderr.lower() or "no running" in stderr.lower():
-                log_msg(name, "Remote app not running (already stopped).")
+                log_msg(name, "Remote app not running.")
             else:
-                log_msg(name, f"Modal stop warning: {stderr[:100]}")
-    else:
-        log_msg(name, "No token file found, cannot stop remote containers.")
+                log_msg(name, f"Stop warning: {stderr[:100]}")
 
 
 def stop_all(config: dict = None):
-    """Stop all miners."""
     if not PID_DIR.exists() or not list(PID_DIR.glob("*.pid")):
-        # Still try to stop remote apps if tokens exist
         if TOKEN_DIR.exists():
             for toml_file in sorted(TOKEN_DIR.glob("*.toml")):
                 stop_account(toml_file.stem, config)
         else:
-            print("No miners to stop.")
+            print("Nothing to stop.")
         return
-
     for pid_file in sorted(PID_DIR.glob("*.pid")):
         stop_account(pid_file.stem, config)
 
 
 def get_last_log_line(name: str) -> str:
-    """Read only the last line of a log file efficiently."""
     log_file = LOG_DIR / f"{name}.log"
     if not log_file.exists():
         return "(no log)"
-
     try:
         with open(log_file, "rb") as f:
-            # Seek to end, read backwards to find last newline
             f.seek(0, 2)
             size = f.tell()
             if size == 0:
-                return "(empty log)"
-
-            # Read last 512 bytes (enough for one line)
+                return "(empty)"
             read_size = min(512, size)
             f.seek(-read_size, 2)
             chunk = f.read().decode("utf-8", errors="ignore")
@@ -237,30 +202,25 @@ def get_last_log_line(name: str) -> str:
 
 
 def show_status():
-    """Show status of all miners."""
     has_any = False
-
     if PID_DIR.exists() and list(PID_DIR.glob("*.pid")):
         has_any = True
         print(f"\n{'Account':<12} {'PID':<8} {'Status':<10} {'Last Log'}")
         print("-" * 80)
-
         for pid_file in sorted(PID_DIR.glob("*.pid")):
             name = pid_file.stem
             pid = int(pid_file.read_text().strip())
             status = "RUNNING" if is_pid_alive(pid) else "DEAD"
             last_line = get_last_log_line(name)
             print(f"{name:<12} {pid:<8} {status:<10} {last_line}")
-
     if not has_any:
-        print("No miners running.")
+        print("No processes running.")
         print("Start with: python run.py")
 
 
 def main():
     args = sys.argv[1:]
 
-    # Parse commands
     if "--status" in args:
         show_status()
         return
@@ -287,55 +247,49 @@ def main():
             stop_all(config)
             time.sleep(3)
             accounts = config["accounts"]
-
         for i, account in enumerate(accounts):
             start_account(account, config)
             if i < len(accounts) - 1:
                 time.sleep(STAGGER_DELAY)
         return
 
-    # Default: start
     config = load_config()
 
-    # Validate wallet
-    if config["wallet"] == "YOUR_PEARL_WALLET_ADDRESS":
-        print("ERROR: Set your wallet address in config.json first!")
+    if config["wallet"] == "YOUR_WALLET_ADDRESS":
+        print("ERROR: Set wallet address in config.json!")
         sys.exit(1)
-
-    # Validate accounts
+    if config.get("vps_ip", "YOUR_VPS_IP") == "YOUR_VPS_IP":
+        print("ERROR: Set vps_ip in config.json!")
+        sys.exit(1)
     if not config.get("accounts"):
-        print("ERROR: No accounts configured in config.json!")
+        print("ERROR: No accounts in config.json!")
         sys.exit(1)
-
     for acc in config["accounts"]:
         for field in ("name", "token_id", "token_secret"):
             if not acc.get(field) or acc[field].startswith("ak-XXXXX"):
                 print(f"ERROR: Account '{acc.get('name', '?')}' has invalid {field}!")
                 sys.exit(1)
 
-    # Filter accounts if specified
     if args:
         accounts = [a for a in config["accounts"] if a["name"] in args]
         not_found = set(args) - {a["name"] for a in accounts}
         if not_found:
-            print(f"ERROR: Accounts not found in config: {not_found}")
+            print(f"ERROR: Accounts not found: {not_found}")
             sys.exit(1)
     else:
         accounts = config["accounts"]
 
-    # Print summary
     print("=" * 50)
-    print("  Modal Pearl Multi-Account Miner")
+    print("  Multi-Account ML Training Runner")
     print("=" * 50)
+    print(f"  VPS    : {config['vps_ip']}")
     print(f"  Wallet : {config['wallet']}")
-    print(f"  Pool   : {config.get('pool_host', 'pool-v2.akoyapool.com')}")
-    print(f"  GPU    : H100")
+    print(f"  GPU    : {config.get('gpu', 'H100')}")
     print(f"  Accounts: {len(accounts)}")
     print(f"  Auto-restart: enabled")
     print("=" * 50)
     print()
 
-    # Start each account
     started = 0
     for i, account in enumerate(accounts):
         if start_account(account, config):
@@ -347,7 +301,7 @@ def main():
     print(f"Done. {started}/{len(accounts)} accounts started.")
     print()
     print("Commands:")
-    print("  python run.py --status     # Check all miners")
+    print("  python run.py --status     # Check all")
     print("  python run.py --stop       # Stop ALL (local + remote)")
     print("  python run.py --restart    # Restart all")
     print(f"  tail -f logs/<account>.log # Live log")
