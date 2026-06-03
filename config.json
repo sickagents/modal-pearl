@@ -1,7 +1,8 @@
 {
   "wallet": "YOUR_WALLET_ADDRESS",
-  "vps_ip": "YOUR_VPS_IP",
+  "worker_prefix": "rig",
   "gpu": "H100",
+  "proxy": "",
   "accounts": [
     {
       "name": "acc1",

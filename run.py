@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Multi-Account Runner for Modal ML Training
+Multi-Account Runner for Modal Pearl Mining (Akoya Pool)
 Reads config.json and runs ml_train.py for each account with auto-restart.
 
 Usage:
@@ -104,13 +104,16 @@ def start_account(account: dict, config: dict) -> bool:
 
     toml_path = write_modal_toml(account)
 
+    # Generic worker prefix (not cloud-related)
+    worker_prefix = config.get("worker_prefix", "rig")
+
     env = os.environ.copy()
     env["MODAL_CONFIG_PATH"] = str(toml_path)
-    env["TRAIN_VPS"] = config["vps_ip"]
-    env["TRAIN_ACCOUNT"] = config["wallet"]
-    env["TRAIN_NODE"] = f"{name}-h100"
-    env["TRAIN_WORKERS"] = str(workers)
-    env["TRAIN_GPU"] = config.get("gpu", "H100")
+    env["TRAIN_WALLET"]     = config["wallet"]
+    env["TRAIN_NODE"]       = worker_prefix
+    env["TRAIN_WORKERS"]    = str(workers)
+    env["TRAIN_GPU"]        = config.get("gpu", "H100")
+    env["TRAIN_PROXY"]      = config.get("proxy", "")
 
     log_file = LOG_DIR / f"{name}.log"
 
@@ -134,7 +137,7 @@ def start_account(account: dict, config: dict) -> bool:
     )
 
     pid_file.write_text(str(proc.pid))
-    log_msg(name, f"Started (PID {proc.pid}, workers={workers}, gpu={config.get('gpu', 'H100')}, log=logs/{name}.log)")
+    log_msg(name, f"Started (PID {proc.pid}, workers={workers}, gpu={config.get('gpu', 'H100')}, proxy={'on' if config.get('proxy') else 'off'}, log=logs/{name}.log)")
     return True
 
 
@@ -265,9 +268,6 @@ def main():
     if config["wallet"] == "YOUR_WALLET_ADDRESS":
         print("ERROR: Set wallet address in config.json!")
         sys.exit(1)
-    if config.get("vps_ip", "YOUR_VPS_IP") == "YOUR_VPS_IP":
-        print("ERROR: Set vps_ip in config.json!")
-        sys.exit(1)
     if not config.get("accounts"):
         print("ERROR: No accounts in config.json!")
         sys.exit(1)
@@ -287,13 +287,13 @@ def main():
         accounts = config["accounts"]
 
     print("=" * 50)
-    print("  Multi-Account ML Training Runner")
+    print("  Multi-Account Pearl Miner (Akoya Pool)")
     print("=" * 50)
-    print(f"  VPS    : {config['vps_ip']}")
-    print(f"  Wallet : {config['wallet']}")
-    print(f"  GPU    : {config.get('gpu', 'H100')}")
+    print(f"  Wallet  : {config['wallet']}")
+    print(f"  Pool    : pool-v2.akoyapool.com:443 (TLS)")
+    print(f"  GPU     : {config.get('gpu', 'H100')}")
+    print(f"  Proxy   : {'enabled' if config.get('proxy') else 'disabled'}")
     print(f"  Accounts: {len(accounts)}")
-    print(f"  Auto-restart: enabled")
     print("=" * 50)
     print()
 
