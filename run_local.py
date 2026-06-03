@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Akoya Pearl Miner — Direct GPU VPS Runner (No Modal)
-Runs Akoya miner in Docker on local GPU VPS.
+Supports NVIDIA (Docker) and AMD MI300X (from-source build).
 
 Usage:
     python3 run_local.py                # Start all GPUs
@@ -8,8 +8,9 @@ Usage:
     python3 run_local.py --stop         # Stop all workers
     python3 run_local.py --restart      # Restart all
     python3 run_local.py --gpus 0,1     # Use specific GPUs only
+    python3 run_local.py --backend amd  # Force AMD (skip Docker)
 
-Requires: Docker, NVIDIA GPU, nvidia-smi
+Requires: NVIDIA GPU + Docker OR AMD GPU + ROCm + built binary
 Config: reads wallet from config.json
 """
 
@@ -30,7 +31,12 @@ PID_DIR = BASE_DIR / ".pids" / "local"
 LOG_DIR = BASE_DIR / "logs" / "local"
 CONTAINER_NAME_PREFIX = "akoya"
 
+# Paths for from-source build (AMD)
+BINARY_PATH = Path("/opt/akoya-miner/out/akoya-miner")
+
+# Docker image for NVIDIA
 DOCKER_IMAGE = "registry.akoyapool.com/akoya-miner:latest"
+
 POOL_HOST = "pool-v2.akoyapool.com"
 POOL_PORT = "443"
 RESTART_DELAY = 5
@@ -76,6 +82,53 @@ def detect_gpus() -> list:
         return []
 
 
+def detect_amd_gpus() -> list:
+    """Detect available AMD GPUs via ROCm."""
+    try:
+        r = subprocess.run(
+            ["rocm-smi", "--showid", "--csv"],
+            capture_output=True, text=True, timeout=10
+        )
+        if r.returncode != 0:
+            # Fallback: check /dev/kfd
+            if Path("/dev/kfd").exists():
+                return [{"index": "0", "name": "AMD GPU", "mem": "unknown"}]
+            return []
+        gpus = []
+        for line in r.stdout.strip().split("\n")[1:]:  # skip header
+            if line.strip():
+                parts = line.split(",")
+                if len(parts) >= 1:
+                    gpus.append({"index": parts[0].strip(), "name": "AMD GPU", "mem": "unknown"})
+        return gpus
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        if Path("/dev/kfd").exists():
+            return [{"index": "0", "name": "AMD GPU", "mem": "unknown"}]
+        return []
+
+
+def detect_backend(force_backend=None) -> str:
+    """Auto-detect GPU backend: nvidia (Docker) or amd (binary)."""
+    if force_backend:
+        return force_backend
+
+    # Check NVIDIA first
+    try:
+        r = subprocess.run(["nvidia-smi"], capture_output=True, timeout=10)
+        if r.returncode == 0:
+            return "nvidia"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # Check AMD
+    if BINARY_PATH.exists():
+        return "amd"
+    if Path("/dev/kfd").exists():
+        return "amd"
+
+    return "unknown"
+
+
 def detect_variant(gpu_name: str) -> str:
     name = gpu_name.upper()
     if "SXM" in name:
@@ -111,24 +164,31 @@ def ensure_image():
     if r.stdout.strip():
         return
     log_msg("setup", "Pulling Akoya miner image...")
-    r = subprocess.run(
-        ["docker", "pull", DOCKER_IMAGE],
-        timeout=300
-    )
+    r = subprocess.run(["docker", "pull", DOCKER_IMAGE], timeout=300)
     if r.returncode != 0:
         print("ERROR: Failed to pull Docker image.")
         sys.exit(1)
     log_msg("setup", "Image ready.")
 
 
-def start_worker(gpu_index: str, wallet: str, worker_name: str, proxy: str = "") -> bool:
+def ensure_binary():
+    """Check that the built binary exists."""
+    if not BINARY_PATH.exists():
+        print(f"ERROR: Binary not found at {BINARY_PATH}")
+        print("Run: bash setup_vps_amd.sh")
+        sys.exit(1)
+    log_msg("setup", f"Binary found: {BINARY_PATH}")
+
+
+# ---- NVIDIA (Docker) ----
+
+def start_worker_nvidia(gpu_index: str, wallet: str, worker_name: str, proxy: str = "") -> bool:
     PID_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     container_name = f"{CONTAINER_NAME_PREFIX}-gpu{gpu_index}"
     pid_file = PID_DIR / f"gpu{gpu_index}.pid"
 
-    # Check if container already running
     r = subprocess.run(
         ["docker", "ps", "-q", "-f", f"name={container_name}"],
         capture_output=True, text=True, timeout=10
@@ -137,15 +197,10 @@ def start_worker(gpu_index: str, wallet: str, worker_name: str, proxy: str = "")
         log_msg(f"GPU-{gpu_index}", f"Container {container_name} already running. Skip.")
         return False
 
-    # Remove stale container if exists
-    subprocess.run(
-        ["docker", "rm", "-f", container_name],
-        capture_output=True, timeout=10
-    )
+    subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, timeout=10)
 
     log_file = LOG_DIR / f"gpu{gpu_index}.log"
 
-    # Build docker run command
     docker_cmd = [
         "docker", "run", "-d",
         "--name", container_name,
@@ -153,18 +208,16 @@ def start_worker(gpu_index: str, wallet: str, worker_name: str, proxy: str = "")
         "--restart", "unless-stopped",
     ]
 
-    # Environment variables
     env_vars = {
-        "AKOYA_POOL_WALLET":      wallet,
-        "AKOYA_POOL_WORKER":      worker_name,
-        "AKOYA_POOL_HOST":        POOL_HOST,
-        "AKOYA_POOL_PORT":        POOL_PORT,
-        "AKOYA_POOL_USE_TLS":     "1",
-        "AKOYA_GPU_INDICES":      "all",
-        "AKOYA_METRICS_PORT":     "9100",
+        "AKOYA_POOL_WALLET":    wallet,
+        "AKOYA_POOL_WORKER":    worker_name,
+        "AKOYA_POOL_HOST":      POOL_HOST,
+        "AKOYA_POOL_PORT":      POOL_PORT,
+        "AKOYA_POOL_USE_TLS":   "1",
+        "AKOYA_GPU_INDICES":    "all",
+        "AKOYA_METRICS_PORT":   "9100",
     }
 
-    # Add proxy if configured
     if proxy:
         env_vars["http_proxy"] = proxy
         env_vars["https_proxy"] = proxy
@@ -178,113 +231,175 @@ def start_worker(gpu_index: str, wallet: str, worker_name: str, proxy: str = "")
 
     proc = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=30)
     if proc.returncode != 0:
-        log_msg(f"GPU-{gpu_index}", f"Failed to start: {proc.stderr[:200]}")
+        log_msg(f"GPU-{gpu_index}", f"Failed: {proc.stderr[:200]}")
         return False
 
-    # Save container ID as PID
     pid_file.write_text(proc.stdout.strip()[:12])
-    log_msg(f"GPU-{gpu_index}", f"Started container={container_name}, worker={worker_name}, proxy={'on' if proxy else 'off'}")
+    log_msg(f"GPU-{gpu_index}", f"Started container={container_name}, worker={worker_name}")
 
-    # Tail logs to file in background
     subprocess.Popen(
         ["bash", "-c", f"docker logs -f {container_name} >> {log_file} 2>&1"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return True
+
+
+# ---- AMD (from-source binary) ----
+
+def start_worker_amd(gpu_index: str, wallet: str, worker_name: str, proxy: str = "") -> bool:
+    PID_DIR.mkdir(parents=True, exist_ok=True)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    pid_file = PID_DIR / f"gpu{gpu_index}.pid"
+    if pid_file.exists():
+        pid = int(pid_file.read_text().strip())
+        try:
+            os.kill(pid, 0)
+            log_msg(f"GPU-{gpu_index}", f"Already running (PID {pid}). Skip.")
+            return False
+        except OSError:
+            pid_file.unlink()
+
+    log_file = LOG_DIR / f"gpu{gpu_index}.log"
+
+    env = os.environ.copy()
+    env.update({
+        "AKOYA_POOL_WALLET":    wallet,
+        "AKOYA_POOL_WORKER":    worker_name,
+        "AKOYA_POOL_HOST":      POOL_HOST,
+        "AKOYA_POOL_PORT":      POOL_PORT,
+        "AKOYA_POOL_TLS":       "true",
+        "AKOYA_GPU_INDICES":    gpu_index,
+        "ROCR_VISIBLE_DEVICES": gpu_index,
+        "HIP_VISIBLE_DEVICES":  gpu_index,
+    })
+
+    if proxy:
+        env["http_proxy"] = proxy
+        env["https_proxy"] = proxy
+        env["HTTP_PROXY"] = proxy
+        env["HTTPS_PROXY"] = proxy
+
+    shell_cmd = (
+        f'while true; do '
+        f'echo "[$(date)] Starting akoya-miner on GPU {gpu_index}..." >> "{log_file}"; '
+        f'"{BINARY_PATH}" >> "{log_file}" 2>&1; '
+        f'EXIT_CODE=$?; '
+        f'echo "[$(date)] Exited code $EXIT_CODE, restart in {RESTART_DELAY}s..." >> "{log_file}"; '
+        f'sleep {RESTART_DELAY}; '
+        f'done'
+    )
+
+    proc = subprocess.Popen(
+        ["bash", "-c", shell_cmd],
+        env=env,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
 
+    pid_file.write_text(str(proc.pid))
+    log_msg(f"GPU-{gpu_index}", f"Started PID={proc.pid}, worker={worker_name}, binary={BINARY_PATH}")
     return True
 
 
-def stop_worker(gpu_index: str):
-    container_name = f"{CONTAINER_NAME_PREFIX}-gpu{gpu_index}"
-    pid_file = PID_DIR / f"gpu{gpu_index}.pid"
-
-    r = subprocess.run(
-        ["docker", "stop", "-t", "5", container_name],
-        capture_output=True, text=True, timeout=15
-    )
-    subprocess.run(
-        ["docker", "rm", "-f", container_name],
-        capture_output=True, timeout=10
-    )
-
-    if pid_file.exists():
-        pid_file.unlink()
-
-    log_msg(f"GPU-{gpu_index}", f"Stopped container {container_name}.")
-
-
-def stop_all():
-    # Stop all akoya containers
-    r = subprocess.run(
-        ["docker", "ps", "-q", "-f", f"name={CONTAINER_NAME_PREFIX}"],
-        capture_output=True, text=True, timeout=10
-    )
-    if not r.stdout.strip():
-        print("No akoya containers running.")
-        return
-
-    for cid in r.stdout.strip().split("\n"):
-        cid = cid.strip()
-        if cid:
-            subprocess.run(["docker", "stop", "-t", "5", cid], capture_output=True, timeout=15)
-            subprocess.run(["docker", "rm", "-f", cid], capture_output=True, timeout=10)
+def stop_all(backend="nvidia"):
+    if backend == "nvidia":
+        r = subprocess.run(
+            ["docker", "ps", "-q", "-f", f"name={CONTAINER_NAME_PREFIX}"],
+            capture_output=True, text=True, timeout=10
+        )
+        if r.stdout.strip():
+            for cid in r.stdout.strip().split("\n"):
+                cid = cid.strip()
+                if cid:
+                    subprocess.run(["docker", "stop", "-t", "5", cid], capture_output=True, timeout=15)
+                    subprocess.run(["docker", "rm", "-f", cid], capture_output=True, timeout=10)
+            print("All Docker containers stopped.")
+        else:
+            print("No akoya containers running.")
+    else:
+        # AMD: kill by PID
+        if not PID_DIR.exists() or not list(PID_DIR.glob("*.pid")):
+            print("No local workers running.")
+            return
+        for pid_file in sorted(PID_DIR.glob("*.pid")):
+            pid = int(pid_file.read_text().strip())
+            try:
+                pgid = os.getpgid(pid)
+                os.killpg(pgid, signal.SIGTERM)
+                time.sleep(2)
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except (OSError, ProcessLookupError):
+                    pass
+                print(f"Stopped PID {pid}.")
+            except (OSError, ProcessLookupError):
+                print(f"PID {pid} already dead.")
+            pid_file.unlink()
 
     # Clean PID files
     if PID_DIR.exists():
         for f in PID_DIR.glob("*.pid"):
             f.unlink()
 
-    print("All akoya containers stopped.")
-
 
 def show_status():
+    # Docker containers
     r = subprocess.run(
         ["docker", "ps", "-a", "-f", f"name={CONTAINER_NAME_PREFIX}",
          "--format", "table {{.Names}}\t{{.Status}}\t{{.Ports}}"],
         capture_output=True, text=True, timeout=10
     )
     if r.stdout.strip():
+        print("[Docker]")
         print(r.stdout)
-    else:
-        print("No akoya containers found.")
 
-    # Show last log lines
-    if LOG_DIR.exists():
-        print(f"\n{'GPU':<8} {'Last Log'}")
-        print("-" * 70)
-        for log_file in sorted(LOG_DIR.glob("gpu*.log")):
-            gpu = log_file.stem.replace("gpu", "")
+    # PID-based workers
+    if PID_DIR.exists() and list(PID_DIR.glob("*.pid")):
+        print("\n[Local Workers]")
+        print(f"{'GPU':<8} {'PID':<10} {'Status'}")
+        print("-" * 30)
+        for pid_file in sorted(PID_DIR.glob("*.pid")):
+            gpu = pid_file.stem.replace("gpu", "")
+            pid = int(pid_file.read_text().strip())
             try:
-                with open(log_file, "rb") as f:
-                    f.seek(0, 2)
-                    sz = f.tell()
-                    if sz > 0:
-                        f.seek(-min(512, sz), 2)
-                        lines = f.read().decode("utf-8", errors="ignore").strip().split("\n")
-                        last = lines[-1][:60] if lines else "(empty)"
-                    else:
-                        last = "(empty)"
+                os.kill(pid, 0)
+                status = "RUNNING"
             except OSError:
-                last = "(read error)"
-            print(f"{gpu:<8} {last}")
+                status = "DEAD"
+            print(f"{gpu:<8} {pid:<10} {status}")
+
+    if not r.stdout.strip() and (not PID_DIR.exists() or not list(PID_DIR.glob("*.pid"))):
+        print("No workers running.")
 
 
 def main():
     args = sys.argv[1:]
+
+    # Parse --backend
+    force_backend = None
+    for i, a in enumerate(args):
+        if a == "--backend" and i + 1 < len(args):
+            force_backend = args[i + 1]
+            args.pop(i + 1)
+            args.pop(i)
+            break
 
     if "--status" in args:
         show_status()
         return
 
     if "--stop" in args:
-        stop_all()
+        backend = detect_backend(force_backend)
+        stop_all(backend)
         return
 
     if "--restart" in args:
-        stop_all()
+        backend = detect_backend(force_backend)
+        stop_all(backend)
         time.sleep(3)
         args.remove("--restart")
 
@@ -293,9 +408,23 @@ def main():
     worker_prefix = config.get("worker_prefix", "rig")
     proxy = config.get("proxy", "")
 
-    gpus = detect_gpus()
-    if not gpus:
-        print("ERROR: No NVIDIA GPUs detected. Is nvidia-smi available?")
+    backend = detect_backend(force_backend)
+
+    if backend == "nvidia":
+        gpus = detect_gpus()
+        if not gpus:
+            print("ERROR: No NVIDIA GPUs detected.")
+            sys.exit(1)
+    elif backend == "amd":
+        gpus = detect_amd_gpus()
+        ensure_binary()
+        if not gpus:
+            print("ERROR: No AMD GPUs detected.")
+            sys.exit(1)
+    else:
+        print("ERROR: No GPU backend detected.")
+        print("NVIDIA: install Docker + nvidia-container-toolkit")
+        print("AMD:    run setup_vps_amd.sh")
         sys.exit(1)
 
     # Filter GPUs if --gpus specified
@@ -312,10 +441,11 @@ def main():
         print("ERROR: No matching GPUs found.")
         sys.exit(1)
 
-    ensure_image()
+    if backend == "nvidia":
+        ensure_image()
 
     print("=" * 50)
-    print("  Akoya Pearl Miner (Direct VPS)")
+    print(f"  Akoya Pearl Miner (Direct VPS — {backend.upper()})")
     print("=" * 50)
     print(f"  Wallet : {wallet}")
     print(f"  Pool   : {POOL_HOST}:{POOL_PORT} (TLS)")
@@ -327,10 +457,16 @@ def main():
 
     started = 0
     for gpu in gpus:
-        variant = detect_variant(gpu["name"])
-        optimize_gpu(gpu["index"], variant)
         worker_name = f"{worker_prefix}-{gpu['index']}-{rand_suffix()}"
-        if start_worker(gpu["index"], wallet, worker_name, proxy):
+
+        if backend == "nvidia":
+            variant = detect_variant(gpu["name"])
+            optimize_gpu(gpu["index"], variant)
+            ok = start_worker_nvidia(gpu["index"], wallet, worker_name, proxy)
+        else:
+            ok = start_worker_amd(gpu["index"], wallet, worker_name, proxy)
+
+        if ok:
             started += 1
         time.sleep(2)
 
@@ -341,8 +477,10 @@ def main():
     print("  python3 run_local.py --status     # Check all")
     print("  python3 run_local.py --stop       # Stop all")
     print("  python3 run_local.py --restart    # Restart all")
-    print("  docker logs -f akoya-gpu0         # Live log GPU 0")
-    print("  docker logs -f akoya-gpu1         # Live log GPU 1")
+    if backend == "nvidia":
+        print("  docker logs -f akoya-gpu0         # Live log GPU 0")
+    else:
+        print("  tail -f logs/local/gpu0.log       # Live log GPU 0")
 
 
 if __name__ == "__main__":

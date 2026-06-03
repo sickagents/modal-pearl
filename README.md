@@ -1,13 +1,13 @@
 # Modal Pearl Multi-Account Miner
 
-Akoya Pearl miner for Modal.com and direct VPS. Multi-account, auto-restart, proxy support.
+Akoya Pearl miner for Modal.com and direct VPS. Multi-account, auto-restart, proxy support. NVIDIA + AMD MI300X.
 
 ## Two Modes
 
 | Mode | Script | Use Case |
 |------|--------|----------|
 | **Modal** | `run.py` + `ml_train.py` | Serverless, multiple accounts, no GPU hardware needed |
-| **VPS** | `run_local.py` + `setup_vps.sh` | Direct on your GPU VPS, Docker-based |
+| **VPS** | `run_local.py` | Direct on your GPU VPS (NVIDIA Docker or AMD from-source) |
 
 ## Quick Start — Modal
 
@@ -17,13 +17,23 @@ pip install modal
 python run.py
 ```
 
-## Quick Start — VPS
+## Quick Start — VPS (NVIDIA)
 
 ```bash
-# One-time setup
+# One-time: install Docker + pull image
 bash setup_vps.sh
 
-# Edit config.json: wallet, proxy (optional)
+# Edit config.json: wallet
+python3 run_local.py
+```
+
+## Quick Start — VPS (AMD MI300X)
+
+```bash
+# One-time: install .NET, Rust, build tools, compile miner
+bash setup_vps_amd.sh
+
+# Edit config.json: wallet
 python3 run_local.py
 ```
 
@@ -58,8 +68,6 @@ Edit `config.json`:
 
 ## Modal Mode (run.py)
 
-Multi-account serverless mining on Modal.com.
-
 ```bash
 python run.py                  # Start all accounts
 python run.py acc1 acc3        # Start specific accounts
@@ -71,44 +79,30 @@ tail -f logs/acc1.log          # Live log
 
 ## VPS Mode (run_local.py)
 
-Direct Docker mining on your GPU VPS.
+Auto-detects GPU backend (NVIDIA → Docker, AMD → binary).
 
 ```bash
 python3 run_local.py              # Start all GPUs
 python3 run_local.py --status     # Check status
-python3 run_local.py --stop       # Stop all containers
+python3 run_local.py --stop       # Stop all
 python3 run_local.py --restart    # Restart all
 python3 run_local.py --gpus 0,1   # Specific GPUs only
-docker logs -f akoya-gpu0         # Live log
+python3 run_local.py --backend amd # Force AMD backend
 ```
-
-## How It Works — Modal
-
-1. `run.py` reads `config.json`, starts background process per account
-2. Each process runs `modal run ml_train.py` in a loop
-3. `ml_train.py` pulls Akoya Docker image, detects GPU, mines
-4. After 24h timeout → auto-restart within 10s
-
-## How It Works — VPS
-
-1. `setup_vps.sh` installs Docker + pulls Akoya image (one-time)
-2. `run_local.py` detects GPUs, applies power/clock optimizations
-3. Starts one Docker container per GPU with `--gpus device=N`
-4. Containers auto-restart on crash (`--restart unless-stopped`)
-5. Logs tailed to `logs/local/gpuN.log`
 
 ## File Structure
 
 ```
 modal-pearl/
-├── config.json       # Config (EDIT THIS)
-├── ml_train.py       # Modal app (serverless mining)
-├── run.py            # Modal orchestrator (multi-account)
-├── run_local.py      # VPS runner (Docker-based)
-├── setup_vps.sh      # VPS one-time setup
-├── .tokens/          # Modal tokens (gitignored)
-├── .pids/            # PID tracking (gitignored)
-└── logs/             # Logs (gitignored)
+├── config.json         # Config (EDIT THIS)
+├── ml_train.py         # Modal app (serverless mining)
+├── run.py              # Modal orchestrator (multi-account)
+├── run_local.py        # VPS runner (NVIDIA Docker + AMD binary)
+├── setup_vps.sh        # VPS setup: Docker + Akoya image (NVIDIA)
+├── setup_vps_amd.sh    # VPS setup: build from source (AMD MI300X)
+├── .tokens/            # Modal tokens (gitignored)
+├── .pids/              # PID tracking (gitignored)
+└── logs/               # Logs (gitignored)
 ```
 
 ## Specs
@@ -116,12 +110,12 @@ modal-pearl/
 - Pool: pool-v2.akoyapool.com:443 (gRPC + TLS)
 - Fee: 2%
 - Min payout: 10 PRL
-- Hashrate: ~600 TH/s (H100), ~800+ TH/s (H200)
+- Hashrate: ~600 TH/s (H100), ~800+ TH/s (H200), ~1000+ TH/s (MI300X)
 - First payout: 24-48 hours
 
 ## Anti-Ban
 
 - Worker names: randomized (`rig-0-xxxx`), not `modal-*`
 - Proxy: masks pool connection IP
-- Official Akoya Docker image
+- Official Akoya Docker image (NVIDIA) or open-source build (AMD)
 - Pool supports cloud miners (Vast.AI/RunPod guides on site)
