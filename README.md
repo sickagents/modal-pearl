@@ -1,24 +1,30 @@
 # Modal Pearl Multi-Account Miner
 
-Multi-account Akoya Pearl miner on Modal.com. Single wallet, multiple Modal accounts, auto-restart, proxy support.
+Akoya Pearl miner for Modal.com and direct VPS. Multi-account, auto-restart, proxy support.
 
-## Features
+## Two Modes
 
-- **Multi-account**: Run unlimited Modal accounts simultaneously
-- **Akoya pool**: Uses official Docker image (`registry.akoyapool.com/akoya-miner:latest`)
-- **Auto-restart**: Miners auto-restart after 24h Modal timeout
-- **Auto-maximize workers**: `\"auto\"` spawns 5 workers per account
-- **Proxy support**: HTTP proxy to mask pool connection IP
-- **Clean stop**: `--stop` kills local + remote Modal containers
-- **GPU auto-detect**: H100/H200/B200/Ada kernel selection
-- **Generic worker names**: Randomized names (not cloud-related)
+| Mode | Script | Use Case |
+|------|--------|----------|
+| **Modal** | `run.py` + `ml_train.py` | Serverless, multiple accounts, no GPU hardware needed |
+| **VPS** | `run_local.py` + `setup_vps.sh` | Direct on your GPU VPS, Docker-based |
 
-## Setup
+## Quick Start — Modal
 
 ```bash
-git clone https://github.com/sickagents/modal-pearl.git
-cd modal-pearl
 pip install modal
+# Edit config.json: wallet, Modal tokens, proxy (optional)
+python run.py
+```
+
+## Quick Start — VPS
+
+```bash
+# One-time setup
+bash setup_vps.sh
+
+# Edit config.json: wallet, proxy (optional)
+python3 run_local.py
 ```
 
 ## Configuration
@@ -45,83 +51,77 @@ Edit `config.json`:
 | Field | Description |
 |-------|-------------|
 | `wallet` | Pearl wallet address (`prl1...`) |
-| `worker_prefix` | Prefix for worker names (default: `rig`) |
-| `gpu` | GPU type: `H100`, `H200`, `B200`, `A100-80GB` |
+| `worker_prefix` | Worker name prefix (default: `rig`) |
+| `gpu` | GPU: `H100`, `H200`, `B200`, `A100-80GB` |
 | `proxy` | HTTP proxy URL (empty = no proxy) |
-| `accounts[].name` | Account identifier |
-| `accounts[].token_id` | Modal token ID |
-| `accounts[].token_secret` | Modal token secret |
-| `accounts[].workers` | `"auto"` (5 workers) or specific number |
+| `accounts` | Modal accounts (only for `run.py`) |
 
-## Usage
+## Modal Mode (run.py)
 
-```bash
-# Start all accounts
-python run.py
-
-# Start specific accounts
-python run.py acc1 acc3
-
-# Check status
-python run.py --stop
-
-# Stop ALL (local + remote containers)
-python run.py --stop
-
-# Restart all
-python run.py --restart
-```
-
-## Monitoring
+Multi-account serverless mining on Modal.com.
 
 ```bash
-# Live log
-tail -f logs/acc1.log
-
-# All logs
-tail -f logs/*.log
-
-# Quick status
-python run.py --status
-
-# Akoya dashboard
-# https://akoyapool.com → paste your wallet
+python run.py                  # Start all accounts
+python run.py acc1 acc3        # Start specific accounts
+python run.py --status         # Check status
+python run.py --stop           # Stop ALL (local + remote)
+python run.py --restart        # Restart all
+tail -f logs/acc1.log          # Live log
 ```
+
+## VPS Mode (run_local.py)
+
+Direct Docker mining on your GPU VPS.
+
+```bash
+python3 run_local.py              # Start all GPUs
+python3 run_local.py --status     # Check status
+python3 run_local.py --stop       # Stop all containers
+python3 run_local.py --restart    # Restart all
+python3 run_local.py --gpus 0,1   # Specific GPUs only
+docker logs -f akoya-gpu0         # Live log
+```
+
+## How It Works — Modal
+
+1. `run.py` reads `config.json`, starts background process per account
+2. Each process runs `modal run ml_train.py` in a loop
+3. `ml_train.py` pulls Akoya Docker image, detects GPU, mines
+4. After 24h timeout → auto-restart within 10s
+
+## How It Works — VPS
+
+1. `setup_vps.sh` installs Docker + pulls Akoya image (one-time)
+2. `run_local.py` detects GPUs, applies power/clock optimizations
+3. Starts one Docker container per GPU with `--gpus device=N`
+4. Containers auto-restart on crash (`--restart unless-stopped`)
+5. Logs tailed to `logs/local/gpuN.log`
 
 ## File Structure
 
 ```
 modal-pearl/
-├── config.json       # Accounts & wallet config (EDIT THIS)
-├── ml_train.py       # Modal app (runs on Modal cloud)
-├── run.py            # Orchestrator (start/stop/status/restart)
-├── run_local.py      # Direct VPS runner (no Modal)
-├── setup_vps.sh      # VPS relay setup (for run_local.py)
-├── .tokens/          # Auto-generated token files (gitignored)
+├── config.json       # Config (EDIT THIS)
+├── ml_train.py       # Modal app (serverless mining)
+├── run.py            # Modal orchestrator (multi-account)
+├── run_local.py      # VPS runner (Docker-based)
+├── setup_vps.sh      # VPS one-time setup
+├── .tokens/          # Modal tokens (gitignored)
 ├── .pids/            # PID tracking (gitignored)
-└── logs/             # Per-account logs (gitignored)
+└── logs/             # Logs (gitignored)
 ```
 
-## How It Works
+## Specs
 
-1. `run.py` reads `config.json` and starts a background process per account
-2. Each process runs `modal run ml_train.py` in a loop (auto-restart on exit)
-3. `ml_train.py` pulls Akoya Docker image, detects GPU, selects kernel
-4. Each worker mines with randomized worker name
-5. After 24h (Modal timeout), workers exit → loop restarts automatically
-6. `--stop` kills local processes AND runs `modal app stop` on remote
+- Pool: pool-v2.akoyapool.com:443 (gRPC + TLS)
+- Fee: 2%
+- Min payout: 10 PRL
+- Hashrate: ~600 TH/s (H100), ~800+ TH/s (H200)
+- First payout: 24-48 hours
 
 ## Anti-Ban
 
-- Worker names: randomized (`rig-xxxx`), not `modal-*` or `h100-*`
-- Proxy: masks pool connection IP (set in config.json)
-- Official Akoya Docker image: pool supports cloud miners
-- Pool supports Vast.AI and RunPod (see their Get Started page)
-
-## Notes
-
-- Pool fee: 2%
-- Min payout: 10 PRL
-- First payout: 24-48 hours
-- Free Modal tier: ~$30/month credit ≈ 7-8 hours H100
-- Hashrate: ~600 TH/s per H100, ~800+ TH/s per H200
+- Worker names: randomized (`rig-0-xxxx`), not `modal-*`
+- Proxy: masks pool connection IP
+- Official Akoya Docker image
+- Pool supports cloud miners (Vast.AI/RunPod guides on site)
