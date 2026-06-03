@@ -6,18 +6,22 @@ set -e
 
 echo "=== Akoya Miner Build (AMD MI300X) ==="
 
+# Fix cross-device link issue for rustup
+export TMPDIR=/root/.rustup/tmp_local
+mkdir -p "$TMPDIR"
+
 # 1. Install .NET 10 SDK
 if ! command -v dotnet &> /dev/null; then
     echo "[1/5] Installing .NET 10 SDK..."
     curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 10.0
     export PATH="$HOME/.dotnet:$PATH"
-    echo 'export PATH="$HOME/.dotnet:$PATH"' >> ~/.bashrc
+    grep -q '.dotnet' ~/.bashrc 2>/dev/null || echo 'export PATH="$HOME/.dotnet:$PATH"' >> ~/.bashrc
     echo "      Done."
 else
     echo "[1/5] .NET already installed: $(dotnet --version)"
 fi
 
-# 2. Install Rust
+# 2. Install Rust (with TMPDIR fix)
 if ! command -v cargo &> /dev/null; then
     echo "[2/5] Installing Rust..."
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -25,6 +29,15 @@ if ! command -v cargo &> /dev/null; then
     echo "      Done."
 else
     echo "[2/5] Rust already installed: $(cargo --version)"
+fi
+
+# Verify cargo works
+if ! cargo --version &> /dev/null; then
+    echo "ERROR: cargo not working. Try:"
+    echo "  rm -rf ~/.rustup"
+    echo "  export TMPDIR=/tmp"
+    echo "  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+    exit 1
 fi
 
 # 3. Install build tools
@@ -71,6 +84,3 @@ echo ""
 echo "Run:"
 echo "  cd /opt/akoya-miner"
 echo "  AKOYA_POOL_WALLET=prl1xxxxx AKOYA_POOL_WORKER=rig01 ./out/akoya-miner"
-echo ""
-echo "Or with run_local.py from modal-pearl repo:"
-echo "  python3 run_local.py"
